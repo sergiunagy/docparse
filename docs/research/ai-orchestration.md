@@ -20,6 +20,10 @@ streaming, structured output, cost/latency, and how much of the
 translate + extract + summarise + Q&A flow each option *owns* versus leaves to our own
 code. Stack is Python + FastAPI.
 
+**Added requirement (post-initial-research):** the model should be **free of charge**
+wherever it is hosted, and the paid path needs a concrete **per-document cost** estimate.
+Both are addressed in [Cost per document, and the free-of-charge preference](#cost-per-document-and-the-free-of-charge-preference) below; they sharpen but do not change the port recommendation.
+
 ## The fact that decides most of it: the OpenAI Chat Completions wire format is the portability substrate
 
 The local-swap requirement is not really a question about a Python library - it is a
@@ -253,6 +257,165 @@ When routing to unmapped local models through LiteLLM, verify capability flags
 `openai` SDK now, keep LiteLLM as the sanctioned drop-in for later, and keep the
 translate/extract/summarise/Q&A orchestration in our own code - never behind a framework.
 
+## Cost per document, and the free-of-charge preference
+
+This section answers two questions the initial research left open: (1) how the
+free-of-charge preference reconciles with the recommendation, and (2) what one average
+document actually costs on the paid OpenAI path.
+
+### Free of charge, reconciled with the seam
+
+- The adapter's whole point (ADR 0001) is that the same application code runs against a
+  local OpenAI-compatible endpoint. A **self-hosted Ollama / vLLM model is free of charge
+  at inference** (you pay only for hardware and electricity you already own), so the
+  free-of-charge preference is fully satisfied by the *local* path the adapter already
+  targets. This is the recommended end state for cost and for the ADR 0001 privacy driver
+  at once.
+- **Free cloud tiers exist but carry a disqualifying caveat for this app.** Google's
+  Gemini free tier is `$0`, but its own pricing table marks "Used to improve our products:
+  **Yes**" for the free tier, i.e. your prompts and responses feed Google's training, and
+  it is hard rate-limited. Sending official financial/legal documents into a training
+  pipeline conflicts directly with the data-sensitivity driver behind ADR 0001. Groq and
+  OpenRouter free models vary similarly in data handling. So a *free cloud* model is not a
+  safe default for real documents.
+- **Net:** for free *and* private, the answer is **local (Ollama/vLLM)**, reached through
+  the same adapter. The paid cloud path below is an optional low-cost bridge while
+  standing up the MVP, not the destination.
+
+### What one average document costs on the paid OpenAI path
+
+Assumptions for an average Finanzamt item (a notification, a tax-return request, or an
+assessment confirmation): about 2 pages, roughly 1,500 words of German, which tokenises to
+about 3,000 source tokens (German runs higher tokens-per-word than English). The one-time
+"understanding" pass is translation + key-info/obligation extraction + summary; interactive
+Q&A is billed separately and is cheap.
+
+| Pipeline call | Input tokens | Output tokens |
+| --- | --- | --- |
+| Translation (DE -> EN, with glossary) | ~3,800 | ~2,500 |
+| Key info + obligations (structured JSON) | ~3,500 | ~500 |
+| Plain-English summary | ~3,200 | ~400 |
+| **Total per document** | **~10,500** | **~3,400** |
+
+Applying current OpenAI list prices (per 1M tokens; fetched 2026-08-21 from
+<https://openai.com/api/pricing/>):
+
+| Model | Input | Output | Approx cost / document |
+| --- | --- | --- | --- |
+| gpt-4o-mini | $0.15 | $0.60 | **~$0.004** (under half a cent) |
+| gpt-4.1-mini | $0.40 | $1.60 | **~$0.01** (about one cent) |
+| gpt-4o | $2.50 | $10.00 | **~$0.06** |
+
+So a family processing ~30 documents/month costs roughly **$0.12/month on gpt-4o-mini** or
+**~$1.80/month on gpt-4o**. Each follow-up Q&A question adds about **$0.0006** on gpt-4o-mini
+(document context in, short answer out) and drops further with prompt/context caching, where
+cached input is ~10x cheaper than fresh input. Cost is therefore *not* a constraint on the
+paid path; model *quality* on German legal register is the real lever (see the translation
+research: small/mini and small local models are weaker on Germanic legal text, so budget
+for occasional escalation to a stronger model or a dedicated MT fallback).
+
+### Recommendation update (unchanged port, sharpened model choice)
+
+Keep the OpenAI Chat Completions contract as the port. For the model behind it, prefer, in
+order:
+
+1. A **free self-hosted** OpenAI-compatible model (Ollama/vLLM) as the target that
+   satisfies free-of-charge *and* privacy at once.
+2. If a cloud model is used to bootstrap the MVP, **gpt-4o-mini** at about half a cent per
+   document is the pragmatic paid bridge, escalating to gpt-4o only for documents the mini
+   model handles poorly.
+3. **Avoid free cloud tiers** (Gemini/Groq/OpenRouter free) for real documents, because
+   their terms may use your data for training.
+
+Because the port is the OpenAI wire contract, all three are the same swap: a base-URL,
+model-name, and key change, no application rewrite.
+
+## Update: routed AI service, local hardware target, and model choice
+
+Later constraints reshape *how* this seam is packaged and *which* models sit behind it.
+None of them change the port (still the OpenAI Chat Completions contract); they promote
+the routing from "later" to "now" and pin the local model.
+
+### The AI Provider becomes a routed AI Service (not a single model)
+
+Per the service-oriented decision (ADR 0002) and the requirement to pick the best model
+*per function and per available hardware*, the port is exposed as an **AI Service** with
+capability methods - `translate`, `extract_assist`, `summarise`, `answer` - rather than a
+single generic `complete`. Behind those methods sits a **Model Router**: a registry that
+maps `(capability, deployment/HW profile) -> (provider, model, params)`. Examples:
+
+- `translate` + local -> OPUS-MT `de-en`; `translate` + cloud -> an LLM
+- `extract_assist` / `summarise` / `answer` + local-12GB -> Qwen2.5-7B; + local-24GB -> 14B;
+  + cloud -> gpt-4o-mini
+- HW detection (a VRAM probe at startup) selects the fitting local variant, or falls back
+  to cloud / CPU
+
+This is exactly what LiteLLM's Router provides, so the earlier "LiteLLM as a later drop-in"
+is promoted to "the routing layer is part of the AI Service now". A lightweight custom
+registry over `openai`-compatible clients is an equally valid implementation; either way
+the router lives *inside* the AI Service and application code only sees the capability
+methods. The set and shape of those methods is an interface-design question deferred to
+the service-architecture ticket, not fixed here.
+
+### No training or fine-tuning in the MVP
+
+Every task (translation, extraction, summary, Q&A) is an **inference** task achievable with
+off-the-shelf instruction-tuned models steered by prompting: system prompts, an injected
+DE->EN glossary, JSON schemas for structured output, and a few worked examples for tricky
+Finanzamt layouts. The escalation ladder is prompt engineering -> few-shot -> glossary/RAG
+injection -> (last resort) LoRA fine-tuning. Fine-tuning is a future lever if prompting
+provably fails on the German legal register, not MVP work. A 12 GB card could do **QLoRA on
+a 7B** if it ever came to that, but not full fine-tuning; we do not need either.
+
+### Local hardware target: RTX 3080 Ti (12 GB)
+
+The GPU is relevant for **inference**, not training - a common conflation. Local LLM
+inference is memory-bandwidth bound, and the 3080 Ti (12 GB GDDR6X, 912 GB/s, 3090-class
+bandwidth) is fast; its **12 GB is the binding constraint**. Fit, via Ollama / llama.cpp
+GGUF (vanilla vLLM FP16 will not fit a 7B in 12 GB):
+
+| Model class | Quant | VRAM | Fit on 3080 Ti | Speed |
+| --- | --- | --- | --- | --- |
+| 7-8B (Qwen2.5-7B, Llama-3.1-8B) | Q4-Q5 | ~5-6 GB | Comfortable, long context | ~70-77 tok/s |
+| 14B (Qwen2.5-14B) | Q4_K_M | ~13.6 GB | Tight; cap context (~7-16k) or slight offload | ~46 tok/s |
+| 32B+ | Q4 | 20 GB+ | Does not fit (heavy offload, ~4 tok/s) | impractical |
+
+Because inference-only local hosting still costs `$0` at inference, the 3080 Ti is the
+**accelerator that makes the free + fully-private local path fast enough to use**. It is
+*not* an MVP requirement: the adapter lets the MVP run on cloud first and flip to local
+later, so the GPU only matters once you choose the local path for privacy/cost.
+
+### Model choice for the German-only MVP
+
+Romanian moved to the fog, so the deciding factor that had favoured Qwen (Romanian support,
+which Llama 3.1 does not officially list) no longer applies. For German -> English:
+
+- **General-LLM slot (extract/summarise/answer):** both work; **Qwen2.5-7B/14B (Apache-2.0)**
+  stays a *soft* preference over **Llama-3.1-8B (Llama Community License)** on cleaner
+  licensing for eventual commercialisation. (Avoid Qwen2.5-3B / 72B - non-Apache licenses;
+  the 7B/14B that fit the GPU are Apache-2.0 anyway.)
+- **Translation slot:** route to a **dedicated MT model, `Helsinki-NLP/opus-mt-de-en`** -
+  tiny (<1 GB), fast, strong on German, permissive - alongside the general LLM.
+
+**"Chinese model -> data leak?" No, not when run locally.** Open-weights are inert numbers
+doing matrix math; a GGUF file has no network path and cannot exfiltrate anything, whoever
+trained it. The trust points are the same for any model: the (open-source, auditable)
+runtime and the download source (pull official weights, verify checksums). Qwen's
+China-origin alignment/censorship concerns are about politically-sensitive Chinese topics,
+irrelevant to German bureaucratic/financial documents. Country of origin affects *what the
+model says*, not *whether your data escapes*; local hosting keeps everything on-box.
+
+### Cloud data-usage guarantee (OpenAI), for the paid bridge
+
+If the paid bridge is used, OpenAI's API terms are materially stronger than Gemini's free
+tier: since 2023-03-01, API data is **not used to train or improve models** unless you
+explicitly opt in; inputs/outputs may sit in **abuse-monitoring logs for up to 30 days**
+then are deleted (visible to limited OpenAI personnel/classifiers, never to other customers
+or the public); **Zero Data Retention** removes even that for approved organisations. This
+is a strong *contractual* guarantee, but not a *technical* one - the documents still transit
+and briefly reside on OpenAI servers - which is exactly why local remains the privacy
+destination for sensitive documents. It is, however, far safer than any free cloud tier.
+
 ## Sources
 
 - Ollama OpenAI compatibility (features: streaming, JSON mode, tools): <https://github.com/ollama/ollama/blob/main/docs/api/openai-compatibility.mdx>
@@ -268,3 +431,10 @@ translate/extract/summarise/Q&A orchestration in our own code - never behind a f
 - LlamaIndex `OpenAILike`: <https://developers.llamaindex.ai/python/framework-api-reference/llms/openai_like/>
 - LlamaIndex LocalAI integration: <https://developers.llamaindex.ai/python/framework/integrations/llm/localai/>
 - vLLM + LlamaIndex RAG example: <https://github.com/vllm-project/vllm/blob/main/examples/applications/rag/retrieval_augmented_generation_with_llamaindex.py>
+- OpenAI API pricing (gpt-4o, gpt-4o-mini, gpt-4.1-mini; fetched 2026-08-21): <https://openai.com/api/pricing/>
+- Gemini API pricing, free tier and "used to improve our products" flag: <https://ai.google.dev/gemini-api/docs/pricing>
+- OpenAI API data controls (no training by default, 30-day abuse logs, Zero Data Retention): <https://developers.openai.com/api/docs/guides/your-data>
+- OpenAI business data privacy (no training on your data by default): <https://openai.com/business-data/>
+- Qwen2.5 licenses per size (Apache-2.0 except 3B/72B): <https://qwenlm.github.io/blog/qwen2.5-llm/>
+- Llama 3.1 supported languages (8, Romanian not listed): <https://github.com/meta-llama/llama-models/blob/main/models/llama3_1/MODEL_CARD.md>
+- RTX 3080 Ti local-model fit (12 GB, Qwen2.5-14B tight): <https://willitrunai.com/can-run/qwen-2.5-14b-on-rtx-3080-ti-12gb>, <https://canirunthismodel.sefarai.com/gpu/nvidia-rtx-3080-ti>

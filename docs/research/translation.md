@@ -14,6 +14,17 @@ feasibility (a hard local-swap requirement exists per ADR 0001).
 This note captures findings against primary sources. Each claim points at the
 source that owns it.
 
+> **Scope update (post-research): the MVP is German -> English only.** Romanian source
+> support has been moved to the fog ("Not yet specified" on the map), so the DE/RO framing
+> below narrows to **German -> English** for the MVP. Two consequences: (1) the local
+> translation route gains a strong, tiny dedicated option, **`Helsinki-NLP/opus-mt-de-en`**
+> (OPUS-MT / MarianMT, permissive, <1 GB, fits the RTX 3080 Ti alongside a 7B general LLM),
+> which the routed AI Service (ADR 0002) can select for the `translate` capability on the
+> local profile; and (2) the LLM-vs-dedicated-MT trade-off below still holds, but the
+> Romanian-specific quality concerns become fog. The recommendation is otherwise unchanged:
+> LLM translation via the shared AI Service for the cloud MVP, OPUS-MT `de-en` as the
+> self-hostable local route.
+
 ## Constraints that frame the decision
 
 - ADR 0001 makes self-hosting locally a **hard long-term requirement** (data
