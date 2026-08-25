@@ -17,6 +17,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 import pymupdf as fitz  # PyMuPDF
 import tiktoken
@@ -44,28 +45,72 @@ GLOSSARY = (
 
 SYSTEM_PROMPT = (
     "You are a careful assistant that reads official German documents from page images "
-    "and returns structured JSON. You OCR the pages yourself. Rules:\n"
-    "1. english_summary: a faithful plain-English summary of what the document says.\n"
-    "2. key_information: sender, doc_type, dates, amounts — lifted from the document only.\n"
-    "3. obligations: actions the document ITSELF explicitly requests (e.g. 'pay X by DATE'). "
-    "Each needs a source_quote (the German text you read it from; it may be paraphrased if "
-    "the scan is unclear) and a deadline if stated.\n"
-    "4. action_plan: broader suggested steps for the recipient. For EACH step set "
+    "and returns structured JSON. You OCR the pages yourself.\n"
+    "LANGUAGE RULE: english_summary and every field ending in _en, plus sender, doc_type, "
+    "period, text, step and rationale, MUST be written in ENGLISH — translate any German. "
+    "German is allowed ONLY in 'source_quote' and 'raw'. Keep verbatim only proper nouns "
+    "(person names, 'Finanzamt Regensburg'), IBANs and statute references (e.g. § 165 AO).\n"
+    "NUMBER RULE: German uses '.' for thousands and ',' for decimals (1.234,56 = 1234.56). "
+    "Amounts printed in a table column as integers with no decimal comma are in CENTS "
+    "(25000 = 250,00; 250 = 2,50). Every row in the same column uses the same unit — apply the "
+    "cents interpretation consistently to the WHOLE column. Put the normalized euro value in "
+    "'value_eur' and the exact printed text in 'raw'. Do NOT invent a total that is not "
+    "printed.\n"
+    "GROUNDING RULE: include only dates, amounts and quotes that literally appear. Never "
+    "compute or infer a date/deadline. 'source_quote' should be verbatim German; if you cannot "
+    "read it, leave it EMPTY rather than inventing it.\n"
+    "Fields:\n"
+    "1. english_summary: a faithful English summary. If a payment is due, state the net amount "
+    "and its due date; if nothing is due for a period, say so explicitly.\n"
+    "2. key_information: sender, doc_type, period, dates, deadlines, amounts, net_due. "
+    "'period' is the timeframe the document is ABOUT (e.g. 'tax year 2021'); 'dates' are dates "
+    "printed on the document; each 'deadlines' entry is a date the recipient must act by; "
+    "'net_due' lists, per period, the net amount the recipient must PAY ('0,00' when nothing is "
+    "due).\n"
+    "3. obligations: actions the document ITSELF requests. Set 'direction': 'recipient_pays' "
+    "when the recipient must pay, 'recipient_receives' when money is paid TO them (a Guthaben / "
+    "Erstattung / refund is ALWAYS 'recipient_receives', NEVER a payment obligation), "
+    "'informational' otherwise. 'text' English, 'source_quote' German. Include a deadline if "
+    "stated.\n"
+    "4. action_plan: broader suggested steps for the recipient. If a payment obligation exists, "
+    "the FIRST step MUST be to pay it (amount + due date). For EACH step set "
     "grounded_in_document=true only if the document itself asks for it, false if it is your "
     "own suggestion beyond the text. Be honest — this measures drift.\n"
     f"{GLOSSARY}"
 )
 
 
+class Amount(BaseModel):
+    label_en: str      # English label, e.g. "principal income tax due"
+    value_eur: str     # normalized euros, e.g. "250,00"; "" if not a money value
+    raw: str           # exactly as printed, e.g. "25000"
+
+
+class Deadline(BaseModel):
+    description_en: str  # English description of what must be done by this date
+    date: str            # only if literally printed; else ""
+    source_quote: str    # verbatim German; "" if not found
+
+
+class NetDue(BaseModel):
+    period: str          # e.g. "2026", "1st quarter 2026"
+    amount_eur: str      # net the recipient must PAY; "0,00" when nothing is due
+    description_en: str  # English note, e.g. "no advance payment due for 2026"
+
+
 class KeyInformation(BaseModel):
     sender: str
     doc_type: str
+    period: str
     dates: list[str]
-    amounts: list[str]
+    deadlines: list[Deadline]
+    amounts: list[Amount]
+    net_due: list[NetDue]
 
 
 class Obligation(BaseModel):
     text: str
+    direction: Literal["recipient_pays", "recipient_receives", "informational"]
     source_quote: str
     deadline: str
 
@@ -232,16 +277,26 @@ def main() -> None:
 
 
 def to_markdown(r: Understanding, log: dict) -> str:
+    ki = r.key_information
     lines = [f"# Understanding — {log['pdf']}", "",
              "## English summary", r.english_summary, "",
              "## Key information",
-             f"- **Sender:** {r.key_information.sender}",
-             f"- **Type:** {r.key_information.doc_type}",
-             f"- **Dates:** {', '.join(r.key_information.dates) or '—'}",
-             f"- **Amounts:** {', '.join(r.key_information.amounts) or '—'}", "",
-             "## Obligations"]
-    lines += [f"- {o.text} (deadline: {o.deadline or '—'})\n  > {o.source_quote}"
-              for o in r.obligations] or ["- (none)"]
+             f"- **Sender:** {ki.sender}",
+             f"- **Type:** {ki.doc_type}",
+             f"- **Period:** {ki.period or '—'}",
+             f"- **Dates:** {', '.join(ki.dates) or '—'}", "",
+             "### Deadlines"]
+    lines += [f"- {d.description_en}: {d.date or '—'}\n  > {d.source_quote or '—'}"
+              for d in ki.deadlines] or ["- (none)"]
+    lines += ["", "### Amounts"]
+    lines += [f"- {a.label_en}: {a.value_eur or '—'} € (raw: {a.raw})"
+              for a in ki.amounts] or ["- (none)"]
+    lines += ["", "### Net due"]
+    lines += [f"- {n.period}: {n.amount_eur} € — {n.description_en}"
+              for n in ki.net_due] or ["- (none)"]
+    lines += ["", "## Obligations"]
+    lines += [f"- [{o.direction}] {o.text} (deadline: {o.deadline or '—'})\n  > "
+              f"{o.source_quote or '—'}" for o in r.obligations] or ["- (none)"]
     lines += ["", "## Action plan"]
     lines += [f"- [{'grounded' if s.grounded_in_document else 'DRIFT'}] {s.step} — "
               f"{s.rationale}" for s in r.action_plan] or ["- (none)"]

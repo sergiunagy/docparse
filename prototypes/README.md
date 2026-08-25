@@ -23,7 +23,8 @@ One directory per prototype, prefixed with the research issue number it validate
 
 | Directory | Validates | Research note |
 | --- | --- | --- |
-| `02-openai-understanding/` | AI orchestration seam (#2) | [`ai-orchestration.md`](../docs/research/ai-orchestration.md) |
+| `02-openai-understanding/` | AI orchestration seam (#2), cloud arm | [`ai-orchestration.md`](../docs/research/ai-orchestration.md) |
+| `02-local-qwen-understanding/` | AI orchestration seam (#2), local-swap arm — same scenario on a self-hosted Qwen3-VL (`qwen3-vl:8b-instruct`, Ollama, RTX 3080 Ti) | [`ai-orchestration.md`](../docs/research/ai-orchestration.md) |
 | `03-pdf-extraction/` (planned) | table/layout extraction + Confidence (#3) | [`pdf-extraction.md`](../docs/research/pdf-extraction.md) |
 | `04-translation/` (planned) | DE→EN legal-register translation (#4) | [`translation.md`](../docs/research/translation.md) |
 

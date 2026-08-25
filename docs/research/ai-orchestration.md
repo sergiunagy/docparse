@@ -416,6 +416,51 @@ is a strong *contractual* guarantee, but not a *technical* one - the documents s
 and briefly reside on OpenAI servers - which is exactly why local remains the privacy
 destination for sensitive documents. It is, however, far safer than any free cloud tier.
 
+## Empirical validation (prototype 02) — desk research confirmed
+
+The recommendation above was run, not just argued, in the two arms of prototype 02
+(`prototypes/02-openai-understanding/` and `prototypes/02-local-qwen-understanding/`). Both
+render a real (redacted) Finanzamt PDF to page images and make **one** Structured-Outputs
+(`json_schema`) Chat Completions call for the full Understanding. The findings back the desk
+research:
+
+- **The OpenAI wire format is the portability substrate — confirmed in code.** The exact same
+  `openai` SDK call, including strict Structured Outputs via `client.beta.chat.completions.parse`,
+  ran **unmodified** against local Ollama's `/v1` surface with a dummy key. Swapping cloud →
+  local was, as ADR-0001 claimed, essentially a `base_url` + model-name change. The real seam
+  costs are small and now concrete: drop the reasoning-model knobs (Qwen isn't GPT-5), image
+  parts drop the `detail` field (Ollama ignores it), and **max context is a server-side
+  provider-profile property** (`OLLAMA_CONTEXT_LENGTH`), invisible to the per-call request — the
+  adapter must model it as a profile property, not a per-call arg. The exact server-side config
+  used for the recorded local runs (set on `ollama serve`, not per-request):
+
+  ```bash
+  export OLLAMA_CONTEXT_LENGTH=32768   # 4096 default hard-fails with exceed_context_size
+  export OLLAMA_FLASH_ATTENTION=1      # required for the quantised KV cache
+  export OLLAMA_KV_CACHE_TYPE=q8_0     # fit the 12 GB RTX 3080 Ti
+  ```
+
+- **Structured Outputs survive the swap.** The `.parse(response_format=…)` json_schema path was
+  schema-adherent on all sample docs across repeated runs, on both cloud and a local 8B Q4 model.
+  The *native* Ollama `format` path is markedly worse (fenced/array-wrapped output, dropped
+  required fields) — so the adapter's JSON-mode fallback should prefer the OpenAI-compat
+  json_schema path and treat the native path as non-strict, repairing around it.
+
+- **Quality parity, local ≈ cloud, on this task.** A head-to-head on the same PDFs found
+  `qwen3-vl:8b-instruct` (local, RTX 3080 Ti, Q4_K_M) produces coherent German-legal English
+  summaries and sane Key-Information / Obligation extraction **on par with `gpt-5-mini`** (cloud).
+  Drift (ungrounded `action_plan` steps) was comparable in shape on both. Cost/latency trade:
+  gpt-5-mini ≈ \$0.004/doc at ~14 s; the local model is **\$0 and fully on-box** at ~3× latency
+  (~32–58 s/doc, ~11 GB VRAM, 100 % GPU). Two operational findings: the **Instruct
+  (non-thinking) build is essential** — the thinking `qwen3-vl:8b` inflated completions to
+  12k–17k tokens and 100–260 s/doc — and a small local model needs **more prescriptive
+  prompting** than the cloud model (Qwen copied German into an English field until the prompt
+  was made explicit).
+
+**Verdict:** issue #2 is validated — the raw `openai` SDK behind the adapter is sufficient for
+the MVP, no router/framework was pulled in, and the local-swap requirement holds in practice.
+Full run notes live in `prototypes/02-local-qwen-understanding/NOTES.md`.
+
 ## Sources
 
 - Ollama OpenAI compatibility (features: streaming, JSON mode, tools): <https://github.com/ollama/ollama/blob/main/docs/api/openai-compatibility.mdx>
