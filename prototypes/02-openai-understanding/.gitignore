@@ -1,0 +1,8 @@
+# Never commit real/sensitive documents or run artefacts
+data/
+samples/
+out/
+
+# Local environment
+.venv/
+.env
